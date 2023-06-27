@@ -1,23 +1,22 @@
-﻿using TerrariaApi.Server;
+using TerrariaApi.Server;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using TShockAPI;
 
 namespace ClanPlugin
 {
     [ApiVersion(2, 1)]
-    public class Plugin : TerrariaPlugin
+    public class ClanPlugin : TerrariaPlugin
     {
-        public override string Name => "Clan Plugin";
-        public override string Author => "Zekevious";
-        public override string Description => "Allows players to create clans and manage members.";
-        public override Version Version => new Version(1, 0, 0);
-
         private Dictionary<string, Clan> clans;
 
-        public Plugin(Main game) : base(game)
+        public override string Author => "YourName";
+        public override string Description => "Clan Plugin";
+        public override string Name => "Clan Plugin";
+        public override Version Version => new Version(1, 0, 0);
+
+        public ClanPlugin(Main game) : base(game)
         {
         }
 
@@ -25,35 +24,81 @@ namespace ClanPlugin
         {
             LoadClanData();
 
-            Commands.ChatCommands.Add(new Command("clan.create", CreateClan, "clancreate", "cc"));
-            Commands.ChatCommands.Add(new Command("clan.leave", LeaveClan, "clanleave", "cl"));
-            Commands.ChatCommands.Add(new Command("clan.rank", ClanRankCommand, "clanrank", "cr"));
-            Commands.ChatCommands.Add(new Command("clan.accept", AcceptClanInvite, "clanaccept", "ca"));
-            Commands.ChatCommands.Add(new Command("clan.invite", ClanInvite, "claninvite", "ci"));
-            Commands.ChatCommands.Add(new Command("clan.kick", ClanKick, "clankick", "ck"));
-            Commands.ChatCommands.Add(new Command("clan.help", DisplayHelp, "clanhelp", "ch"));
+            Commands.ChatCommands.Add(new Command("clan.create", ClanCreate, "clancreate")
+            {
+                HelpText = "Create a new clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.leave", ClanLeave, "clanleave")
+            {
+                HelpText = "Leave your current clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.rank", ClanRankCommand, "clanrank")
+            {
+                HelpText = "Change a player's rank in your clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.accept", AcceptClanInvite, "clanaccept")
+            {
+                HelpText = "Accept an invitation to join a clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.invite", ClanInvite, "claninvite")
+            {
+                HelpText = "Invite a player to join your clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.kick", ClanKick, "clankick")
+            {
+                HelpText = "Kick a player from your clan."
+            });
+
+            Commands.ChatCommands.Add(new Command("clan.help", DisplayHelp, "clan")
+            {
+                HelpText = "Clan plugin commands."
+            });
+
+            ServerApi.Hooks.GameInitialize.Register(this, OnInitialize);
+            ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                SaveClanData();
+                ServerApi.Hooks.GameInitialize.Deregister(this, OnInitialize);
+                ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
             }
+
             base.Dispose(disposing);
         }
 
-        private void CreateClan(CommandArgs args)
+        private void OnInitialize(EventArgs args)
+        {
+            TShockAPI.Hooks.GeneralHooks.ReloadEvent += OnReload;
+        }
+
+        private void OnLeave(LeaveEventArgs args)
+        {
+            var player = TShock.Players[args.Who];
+            if (player != null)
+            {
+                if (IsInClan(player))
+                {
+                    SaveClanData();
+                }
+            }
+        }
+
+        private void OnReload(ReloadEventArgs args)
+        {
+            LoadClanData();
+        }
+
+        private void ClanCreate(CommandArgs args)
         {
             var player = args.Player;
-            var clanName = args.Parameters.Count > 0 ? args.Parameters[0] : string.Empty;
-
-            if (string.IsNullOrEmpty(clanName))
-            {
-                player.SendErrorMessage("Invalid syntax! Proper syntax: /clan create <clanName>");
-                return;
-            }
-
             var account = player.Account;
 
             if (IsInClan(player))
@@ -61,6 +106,14 @@ namespace ClanPlugin
                 player.SendErrorMessage("You are already in a clan.");
                 return;
             }
+
+            if (args.Parameters.Count == 0)
+            {
+                player.SendErrorMessage("Invalid syntax! Proper syntax: /clan create <clanName>");
+                return;
+            }
+
+            var clanName = args.Parameters[0];
 
             if (clans.ContainsKey(clanName))
             {
@@ -72,10 +125,11 @@ namespace ClanPlugin
             clan.AddMember(account.Name, ClanRank.Owner);
             clans.Add(clanName, clan);
 
-            player.SendSuccessMessage($"Clan '{clanName}' created.");
+            player.SendSuccessMessage($"Clan '{clanName}' has been created. You are the owner.");
+            SaveClanData();
         }
 
-        private void LeaveClan(CommandArgs args)
+        private void ClanLeave(CommandArgs args)
         {
             var player = args.Player;
             var account = player.Account;
@@ -87,17 +141,18 @@ namespace ClanPlugin
             }
 
             var clan = GetPlayerClan(player);
-            var rank = GetPlayerRank(player);
-
-            if (rank == ClanRank.Owner)
+            if (clan.Owner == account.Name)
             {
                 DisbandClan(clan);
-                player.SendErrorMessage("Your clan has been disbanded.");
-                return;
+                player.SendSuccessMessage($"You have disbanded the clan '{clan.Name}'.");
+            }
+            else
+            {
+                clan.RemoveMember(account.Name);
+                player.SendSuccessMessage($"You have left the clan '{clan.Name}'.");
             }
 
-            clan.RemoveMember(account.Name);
-            player.SendSuccessMessage("You have left the clan.");
+            SaveClanData();
         }
 
         private void ClanRankCommand(CommandArgs args)
@@ -112,43 +167,49 @@ namespace ClanPlugin
             }
 
             var clan = GetPlayerClan(player);
-            var rank = GetPlayerRank(player);
+            var targetPlayerName = args.Parameters.Count > 0 ? args.Parameters[0] : "";
 
-            if (rank != ClanRank.Owner)
-            {
-                player.SendErrorMessage("You cannot rank other players in the clan.");
-                return;
-            }
-
-            if (args.Parameters.Count < 2)
+            if (targetPlayerName == "")
             {
                 player.SendErrorMessage("Invalid syntax! Proper syntax: /clan rank <playerName> <rank>");
                 return;
             }
 
-            var playerName = args.Parameters[0];
-            var targetRank = ParseClanRank(args.Parameters[1]);
+            var targetPlayer = TShock.Users.GetUsers().Find(u => u.Name.Equals(targetPlayerName, StringComparison.OrdinalIgnoreCase));
+            if (targetPlayer == null)
+            {
+                player.SendErrorMessage("Player not found.");
+                return;
+            }
 
+            if (!clan.IsMember(targetPlayer.Name))
+            {
+                player.SendErrorMessage($"Player '{targetPlayer.Name}' is not a member of your clan.");
+                return;
+            }
+
+            if (clan.Owner != account.Name && clan.GetMemberRank(account.Name) != ClanRank.Admin)
+            {
+                player.SendErrorMessage("You do not have permission to change ranks in your clan.");
+                return;
+            }
+
+            var targetRank = args.Parameters.Count > 1 ? ParseClanRank(args.Parameters[1]) : ClanRank.None;
             if (targetRank == ClanRank.None)
             {
-                player.SendErrorMessage("Invalid rank specified.");
+                player.SendErrorMessage("Invalid rank. Available ranks: Member, Admin");
                 return;
             }
 
-            if (!clan.IsMember(playerName))
+            if (clan.Owner == targetPlayer.Name && targetRank != ClanRank.Owner)
             {
-                player.SendErrorMessage("The specified player is not a member of your clan.");
+                player.SendErrorMessage("You cannot change the rank of the clan owner.");
                 return;
             }
 
-            if (playerName.Equals(account.Name, StringComparison.OrdinalIgnoreCase))
-            {
-                player.SendErrorMessage("You cannot unrank yourself!");
-                return;
-            }
-
-            clan.AddMember(playerName, targetRank);
-            player.SendSuccessMessage($"Player '{playerName}' has been ranked as '{targetRank}'.");
+            clan.AddMember(targetPlayer.Name, targetRank);
+            player.SendSuccessMessage($"Player '{targetPlayer.Name}' has been ranked as '{targetRank}'.");
+            SaveClanData();
         }
 
         private void AcceptClanInvite(CommandArgs args)
@@ -178,14 +239,15 @@ namespace ClanPlugin
 
             var clan = clans[clanName];
 
-            if (!clan.CanInvite(account.Name))
+            if (clan.IsMember(account.Name))
             {
-                player.SendErrorMessage($"You have not been invited to join clan '{clanName}'.");
+                player.SendErrorMessage($"You are already a member of the clan '{clanName}'.");
                 return;
             }
 
             clan.AddMember(account.Name, ClanRank.Member);
-            player.SendSuccessMessage($"You have joined clan '{clanName}'.");
+            player.SendSuccessMessage($"You have joined the clan '{clanName}'.");
+            SaveClanData();
         }
 
         private void ClanInvite(CommandArgs args)
@@ -200,11 +262,9 @@ namespace ClanPlugin
             }
 
             var clan = GetPlayerClan(player);
-            var rank = GetPlayerRank(player);
-
-            if (rank != ClanRank.Admin && rank != ClanRank.Owner)
+            if (clan.Owner != account.Name && clan.GetMemberRank(account.Name) != ClanRank.Admin)
             {
-                player.SendErrorMessage("You don't have permission to invite players to the clan.");
+                player.SendErrorMessage("You do not have permission to invite players to your clan.");
                 return;
             }
 
@@ -214,26 +274,28 @@ namespace ClanPlugin
                 return;
             }
 
-            var playerName = args.Parameters[0];
-
-            if (clan.IsMember(playerName))
+            var targetPlayerName = args.Parameters[0];
+            var targetPlayer = TShock.Users.GetUsers().Find(u => u.Name.Equals(targetPlayerName, StringComparison.OrdinalIgnoreCase));
+            if (targetPlayer == null)
             {
-                player.SendErrorMessage("This user is already in a clan!");
+                player.SendErrorMessage("Player not found.");
                 return;
             }
 
-            var inviteMessage = $"You have been invited to join '{clan.Name}'. Type '/clan accept {clan.Name}' to join.";
-            var invitePlayer = TShock.Utils.FindPlayer(playerName);
+            if (clan.IsMember(targetPlayer.Name))
+            {
+                player.SendErrorMessage($"Player '{targetPlayer.Name}' is already a member of your clan.");
+                return;
+            }
 
-            if (invitePlayer != null)
+            if (clan.IsInvited(targetPlayer.Name))
             {
-                invitePlayer.SendInfoMessage(inviteMessage);
-                player.SendSuccessMessage($"Invitation sent to player '{playerName}'.");
+                player.SendErrorMessage($"Player '{targetPlayer.Name}' has already been invited to your clan.");
+                return;
             }
-            else
-            {
-                player.SendErrorMessage($"Player '{playerName}' is not online.");
-            }
+
+            clan.InviteMember(targetPlayer.Name);
+            player.SendSuccessMessage($"Player '{targetPlayer.Name}' has been invited to your clan.");
         }
 
         private void ClanKick(CommandArgs args)
@@ -248,11 +310,9 @@ namespace ClanPlugin
             }
 
             var clan = GetPlayerClan(player);
-            var rank = GetPlayerRank(player);
-
-            if (rank != ClanRank.Admin && rank != ClanRank.Owner)
+            if (clan.Owner != account.Name && clan.GetMemberRank(account.Name) != ClanRank.Admin)
             {
-                player.SendErrorMessage("You don't have permission to kick players from the clan.");
+                player.SendErrorMessage("You do not have permission to kick players from your clan.");
                 return;
             }
 
@@ -262,125 +322,61 @@ namespace ClanPlugin
                 return;
             }
 
-            var playerName = args.Parameters[0];
-
-            if (!clan.IsMember(playerName))
+            var targetPlayerName = args.Parameters[0];
+            if (!clan.IsMember(targetPlayerName))
             {
-                player.SendErrorMessage("The specified player is not a member of your clan.");
+                player.SendErrorMessage($"Player '{targetPlayerName}' is not a member of your clan.");
                 return;
             }
 
-            clan.RemoveMember(playerName);
-            player.SendSuccessMessage($"Player '{playerName}' has been kicked from the clan.");
+            clan.RemoveMember(targetPlayerName);
+            player.SendSuccessMessage($"Player '{targetPlayerName}' has been kicked from your clan.");
+            SaveClanData();
         }
 
         private void DisplayHelp(CommandArgs args)
         {
             var player = args.Player;
 
-            player.SendInfoMessage("==== Clan Plugin ====");
+            player.SendInfoMessage("--- Clan Plugin Commands ---");
             player.SendInfoMessage("/clan create <clanName> - Create a new clan.");
             player.SendInfoMessage("/clan leave - Leave your current clan.");
             player.SendInfoMessage("/clan rank <playerName> <rank> - Change a player's rank in your clan.");
             player.SendInfoMessage("/clan accept <clanName> - Accept an invitation to join a clan.");
             player.SendInfoMessage("/clan invite <playerName> - Invite a player to join your clan.");
             player.SendInfoMessage("/clan kick <playerName> - Kick a player from your clan.");
-        }
-
-        private bool IsInClan(TSPlayer player)
-        {
-            return clans.Values.Any(clan => clan.IsMember(player.Account.Name));
-        }
-
-        private Clan GetPlayerClan(TSPlayer player)
-        {
-            return clans.Values.FirstOrDefault(clan => clan.IsMember(player.Account.Name));
-        }
-
-        private ClanRank GetPlayerRank(TSPlayer player)
-        {
-            var clan = GetPlayerClan(player);
-            return clan?.GetMemberRank(player.Account.Name) ?? ClanRank.None;
-        }
-
-        private ClanRank ParseClanRank(string rank)
-        {
-            switch (rank.ToLowerInvariant())
-            {
-                case "member":
-                    return ClanRank.Member;
-                case "admin":
-                    return ClanRank.Admin;
-                case "owner":
-                    return ClanRank.Owner;
-                default:
-                    return ClanRank.None;
-            }
+            player.SendInfoMessage("/clan - Clan plugin commands.");
         }
 
         private void LoadClanData()
         {
-            var path = Path.Combine(TShock.SavePath, "ClanData.txt");
-
-            if (!File.Exists(path))
+            if (!File.Exists("ClanData.txt"))
             {
                 clans = new Dictionary<string, Clan>();
                 return;
             }
 
-            using (var reader = new StreamReader(path))
+            using (var reader = new StreamReader("ClanData.txt"))
             {
-                clans = new Dictionary<string, Clan>();
-
-                while (!reader.EndOfStream)
-                {
-                    var line = reader.ReadLine();
-                    var data = line.Split(',');
-
-                    if (data.Length >= 3)
-                    {
-                        var clanName = data[0];
-                        var ownerName = data[1];
-                        var memberData = data.Skip(2).ToArray();
-
-                        var clan = new Clan(clanName, ownerName);
-                        clans.Add(clanName, clan);
-
-                        foreach (var member in memberData)
-                        {
-                            var memberInfo = member.Split(':');
-
-                            if (memberInfo.Length == 2)
-                            {
-                                var playerName = memberInfo[0];
-                                var memberRank = (ClanRank)Enum.Parse(typeof(ClanRank), memberInfo[1]);
-                                clan.AddMember(playerName, memberRank);
-                            }
-                        }
-                    }
-                }
+                var json = reader.ReadToEnd();
+                clans = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, Clan>>(json);
             }
         }
 
         private void SaveClanData()
         {
-            var path = Path.Combine(TShock.SavePath, "ClanData.txt");
+            var json = Newtonsoft.Json.JsonConvert.SerializeObject(clans);
+            File.WriteAllText("ClanData.txt", json);
+        }
 
-            using (var writer = new StreamWriter(path))
-            {
-                foreach (var clan in clans.Values)
-                {
-                    var clanData = $"{clan.Name},{clan.Owner}";
+        private bool IsInClan(TSPlayer player)
+        {
+            return GetPlayerClan(player) != null;
+        }
 
-                    foreach (var member in clan.Members)
-                    {
-                        var memberData = $"{member.Key}:{member.Value}";
-                        clanData += $",{memberData}";
-                    }
-
-                    writer.WriteLine(clanData);
-                }
-            }
+        private Clan GetPlayerClan(TSPlayer player)
+        {
+            return clans.Values.FirstOrDefault(c => c.IsMember(player.Account.Name));
         }
 
         private void DisbandClan(Clan clan)
@@ -388,43 +384,16 @@ namespace ClanPlugin
             clans.Remove(clan.Name);
         }
 
-        private class Clan
+        private ClanRank ParseClanRank(string rankString)
         {
-            public string Name { get; }
-            public string Owner { get; }
-            public Dictionary<string, ClanRank> Members { get; }
-
-            public Clan(string name, string owner)
+            switch (rankString.ToLower())
             {
-                Name = name;
-                Owner = owner;
-                Members = new Dictionary<string, ClanRank>();
-            }
-
-            public void AddMember(string playerName, ClanRank rank)
-            {
-                Members[playerName] = rank;
-            }
-
-            public void RemoveMember(string playerName)
-            {
-                Members.Remove(playerName);
-            }
-
-            public bool IsMember(string playerName)
-            {
-                return Members.ContainsKey(playerName);
-            }
-
-            public ClanRank GetMemberRank(string playerName)
-            {
-                return Members.TryGetValue(playerName, out var rank) ? rank : ClanRank.None;
-            }
-
-            public bool CanInvite(string playerName)
-            {
-                var rank = GetMemberRank(playerName);
-                return rank == ClanRank.Admin || rank == ClanRank.Owner;
+                case "admin":
+                    return ClanRank.Admin;
+                case "member":
+                    return ClanRank.Member;
+                default:
+                    return ClanRank.None;
             }
         }
     }
